@@ -369,6 +369,12 @@
     <ClInclude Include="..\src\wingui\WinGui.h">
       <Filter>src\wingui</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\PdfBookmarkEditor.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\TextToSpeech.h">
+      <Filter>src</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\ext\darkmodelib\src\DarkModeSubclass.cpp">
@@ -799,6 +805,12 @@
     </ClCompile>
     <ClCompile Include="..\src\wingui\Wnd.cpp">
       <Filter>src\wingui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PdfBookmarkEditor.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TextToSpeech.cpp">
+      <Filter>src</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
