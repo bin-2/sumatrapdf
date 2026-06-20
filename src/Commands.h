@@ -247,8 +247,8 @@ enum {
     CmdSavePdfChanges = 435,
     CmdReadAloud = 436,
     CmdStopReadAloud = 437,
-
-    CmdNone = 438,
+    CmdToggleHoverPreview = 439,
+    CmdNone = 440,
 
     /* range for file history */
     CmdFileHistoryFirst,

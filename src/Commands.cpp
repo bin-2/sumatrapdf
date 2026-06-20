@@ -251,6 +251,7 @@ static SeqStrings gCommandNames =
     "CmdSavePdfChanges\0"
     "CmdReadAloud\0"
     "CmdStopReadAloud\0"
+    "CmdToggleHoverPreview\0"
     "CmdNone\0"
     "\0";
 
@@ -492,6 +493,7 @@ static i32 gCommandIds[] = {
     CmdSavePdfChanges,
     CmdReadAloud,
     CmdStopReadAloud,
+    CmdToggleHoverPreview,
     CmdNone,
 };
 
@@ -733,6 +735,7 @@ SeqStrings gCommandDescriptions =
     "Save PDF Changes\0"
     "Read Aloud\0"
     "Stop Read Aloud\0"
+    "Toggle Hover Preview\0"
     "Do nothing\0"
     "\0";
 // clang-format on

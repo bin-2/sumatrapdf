@@ -52,6 +52,7 @@ struct WindowTab;
 
 struct Annotation;
 struct ILinkHandler;
+struct RefHoverState;
 
 // Current action being performed with a mouse
 enum class MouseAction {
@@ -276,6 +277,8 @@ struct MainWindow {
     IPageElement* linkOnLastButtonDown = nullptr;
     AutoFreeStr urlOnLastButtonDown;
     Annotation* annotationUnderCursor = nullptr;
+    RefHoverState* refHover = nullptr;
+
     // highlight rectangle for element under cursor during context menu (in page coordinates)
     RectF contextMenuHighlightRect{};
     int contextMenuHighlightPageNo = 0;

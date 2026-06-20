@@ -57,6 +57,8 @@
 #include "Toolbar.h"
 #include "Translations.h"
 
+#include "RefHover.h"
+
 #include "utils/Log.h"
 
 // if set instead of trying to render pages we don't have, we simply do nothing
@@ -793,6 +795,25 @@ static bool gShowAnnotationNotification = true;
 // Forward declaration
 static RectF CalculateResizedRect(MainWindow* win, int x, int y);
 
+// Returns true when el is an internal-document link (not an external URL or
+// file launch). Such links are eligible for RefHover destination preview.
+static bool IsInternalLinkDest(IPageElement* el, DisplayModel* dm) {
+    if (!el || !el->Is(kindPageElementDest)) {
+        return false;
+    }
+    IPageDestination* dest = el->AsLink();
+    if (!dest) {
+        return false;
+    }
+    Kind k = dest->GetKind();
+    if (k == kindDestinationLaunchURL || k == kindDestinationLaunchFile) {
+        return false;
+    }
+    // a malformed document can have a link to a non-existent page
+    int destPage = PageDestGetPageNo(dest);
+    return dm && dm->ValidPageNo(destPage);
+}
+
 static void OnMouseMove(MainWindow* win, int x, int y, WPARAM) {
     DisplayModel* dm = win->AsFixed();
     // ReportIf(!dm); // can happen if reload fails, we delete DisplayModel
@@ -874,13 +895,18 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM) {
         case MouseAction::None: {
             Annotation* annot = dm->GetAnnotationAtPos(pos, nullptr);
             Annotation* prev = win->annotationUnderCursor;
+            IPageElement* el = dm->GetElementAtPos(pos, nullptr);
+            // the annotation notification below is suppressed in favor of
+            // the citation hover popup, but only when that feature is on
+            bool citationHoverEnabled = gGlobalPrefs->citationHoverDelay >= 0;
+            bool hasInternalLink = citationHoverEnabled && IsInternalLinkDest(el, dm);
             if (annot != prev) {
 #if 0
                 TempStr name = annot ? AnnotationReadableNameTemp(annot->type) : (TempStr) "none";
                 TempStr prevName = prev ? AnnotationReadableNameTemp(prev->type) : (TempStr) "none";
                 logf("different annot under cursor. prev: %s, new: %s\n", prevName, name);
 #endif
-                if (gShowAnnotationNotification) {
+                if (gShowAnnotationNotification && !hasInternalLink) {
                     if (annot) {
                         // auto r = annot->bounds;
                         // logf("new pos: %d-%d, size: %d-%d\n", (int)r.x, (int)r.y, (int)r.dx, (int)r.dy);
@@ -898,10 +924,46 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM) {
                     }
                 }
             }
-            if (!annot) {
+            if (!annot || hasInternalLink) {
                 RemoveNotificationsForGroup(win->hwndCanvas, kNotifAnnotation);
             }
             win->annotationUnderCursor = annot;
+
+            // RefHover: render the destination region of an internal link
+            // (bibliography entry, glossary, generic goto-link) into a popup.
+            if (citationHoverEnabled) {
+                if (!win->refHover) {
+                    win->refHover = RefHoverCreate(win->hwndCanvas);
+                }
+                if (win->refHover && hasInternalLink) {
+                    // request WM_MOUSELEAVE so popup hides when cursor leaves canvas
+                    TrackMouseLeave(win->hwndCanvas);
+                    IPageDestination* dest = el->AsLink();
+                    int destPage = PageDestGetPageNo(dest);
+                    RectF destPt = PageDestGetDestPoint(dest);
+                    float destZoom = PageDestGetZoom(dest);
+                    Point screenPt = {x, y};
+                    ClientToScreen(win->hwndCanvas, (POINT*)&screenPt);
+                    int srcPage = el->GetPageNo();
+                    RectF srcRect = el->GetRect();
+                    Rect pageScreenRect{};
+                    PageInfo* pi = (srcPage > 0) ? dm->GetPageInfo(srcPage) : nullptr;
+                    if (pi && !pi->pageOnScreen.IsEmpty()) {
+                        pageScreenRect = pi->pageOnScreen;
+                        POINT topLeft = {pageScreenRect.x, pageScreenRect.y};
+                        ClientToScreen(win->hwndCanvas, &topLeft);
+                        pageScreenRect.x = topLeft.x;
+                        pageScreenRect.y = topLeft.y;
+                    }
+                    int delayMs = gGlobalPrefs->citationHoverDelay;
+                    RefHoverSchedule(win->refHover, win->hwndCanvas, delayMs, screenPt, destPage, destPt.x, destPt.y,
+                                     destZoom, srcPage, srcRect, pageScreenRect);
+                } else if (win->refHover) {
+                    RefHoverHide(win->refHover, win->hwndCanvas);
+                }
+            } else if (win->refHover) {
+                RefHoverHide(win->refHover, win->hwndCanvas);
+            }
             break;
         }
 
@@ -1075,6 +1137,10 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
     if (IsRightDragging(win)) {
         return;
     }
+
+    // hide the citation-hover popup: a click either follows the hovered link
+    // or starts a selection / drag, during which the popup would be stale
+    RefHoverHide(win->refHover, win->hwndCanvas);
 
     if (MouseAction::Scrolling == win->mouseAction) {
         win->mouseAction = MouseAction::None;
@@ -2093,6 +2159,29 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
         return res;
     }
 
+    // Mouse-wheel on the citation-hover popup (cursor still on the citation
+    // link that opened it). Avoids moving the cursor onto the popup itself,
+    // which would dismiss the hover.
+    //   plain wheel -> scroll popup content (rolls over to prev/next page)
+    //   ctrl+wheel  -> zoom popup content
+    if (win->refHover && win->refHover->hwndPopup && IsWindowVisible(win->refHover->hwndPopup)) {
+        DisplayModel* dmHover = win->AsFixed();
+        if (dmHover) {
+            Point pt = HwndGetCursorPos(win->hwndCanvas);
+            IPageElement* elHover = dmHover->GetElementAtPos(pt, nullptr);
+            if (IsInternalLinkDest(elHover, dmHover)) {
+                short delta = GET_WHEEL_DELTA_WPARAM(wp);
+                bool isCtrl = (LOWORD(wp) & MK_CONTROL) || IsCtrlPressed();
+                if (isCtrl) {
+                    RefHoverWheelZoom(win->refHover, dmHover->GetEngine(), delta);
+                } else {
+                    RefHoverWheelScroll(win->refHover, dmHover->GetEngine(), delta);
+                }
+                return 0;
+            }
+        }
+    }
+
     DisplayModel* dm = win->AsFixed();
 
     // Note: not all mouse drivers correctly report the Ctrl key's state
@@ -2603,6 +2692,12 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
             OnMouseMove(win, x, y, wp);
             return 0;
 
+        case WM_MOUSELEAVE:
+            if (win->refHover) {
+                RefHoverHide(win->refHover, win->hwndCanvas);
+            }
+            return 0;
+
         case WM_LBUTTONDOWN:
             OnMouseLeftButtonDown(win, x, y, wp);
             return 0;
@@ -2847,6 +2942,22 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
                 SetCursor((HCURSOR) nullptr);
             }
             break;
+
+        case kRefHoverTimerID: {
+            // the document might have changed (tab switch, reload, close)
+            // between scheduling the hover and the timer firing, making the
+            // pending page invalid for the current document
+            DisplayModel* dm = win->AsFixed();
+            int destPage = win->refHover ? win->refHover->pending.destPage : -1;
+            if (!dm || !dm->ValidPageNo(destPage)) {
+                KillTimer(hwnd, kRefHoverTimerID);
+                RefHoverHide(win->refHover, hwnd);
+                break;
+            }
+            float pageZoom = dm->GetZoomReal(destPage);
+            RefHoverOnTimer(win->refHover, hwnd, dm->GetEngine(), pageZoom);
+            break;
+        }
 
         case HIDE_FWDSRCHMARK_TIMER_ID:
             win->fwdSearchMark.hideStep++;

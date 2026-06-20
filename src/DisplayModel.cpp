@@ -332,135 +332,87 @@ static int LastPageInARowNo(int pageNo, int columns, bool showCover, int pageCou
     return std::min(lastPageNo, pageCount);
 }
 
-// Navigation history: remember stable views without turning every
-// scroll/page transition into a fake Back/Forward entry. A view becomes a
-// candidate after it is reached; it is committed only when the next explicit
-// view-changing operation happens after the user has stayed there for long
-// enough.
+// Stable-view nav point tracking: remember views the user dwelled on so
+// that Back / Forward have history entries for plain scrolling and page
+// turns, without turning every intermediate scroll position into a fake
+// history entry. A view becomes a candidate once it is reached; it is
+// committed into navHistory by the next view-changing operation, but only
+// if the user stayed on it for long enough.
 static constexpr DWORD64 kStableNavPointDelayMs = 1500;
 
-struct StableNavPointRecord {
-    DisplayModel* dm = nullptr;
-    ScrollState pending = ScrollState(kInvalidPageNo, -1, -1);
-    ScrollState lastCommitted = ScrollState(kInvalidPageNo, -1, -1);
-    DWORD64 pendingTick = 0;
-    bool hasPending = false;
-    bool hasLastCommitted = false;
-    bool suppress = false;
-};
-
-static Vec<StableNavPointRecord> gStableNavPointRecords;
-
-static StableNavPointRecord* GetStableNavPointRecord(DisplayModel* dm, bool create) {
-    for (size_t i = 0; i < gStableNavPointRecords.size(); i++) {
-        auto& rec = gStableNavPointRecords.at(i);
-        if (rec.dm == dm) {
-            return &rec;
-        }
-    }
-    if (!create) {
-        return nullptr;
-    }
-    StableNavPointRecord rec;
-    rec.dm = dm;
-    gStableNavPointRecords.Append(rec);
-    return &gStableNavPointRecords.Last();
-}
-
-static void ForgetStableNavPointRecord(DisplayModel* dm) {
-    for (size_t i = gStableNavPointRecords.size(); i > 0; i--) {
-        if (gStableNavPointRecords.at(i - 1).dm == dm) {
-            gStableNavPointRecords.RemoveAt(i - 1);
-            return;
-        }
-    }
-}
-
 static bool IsValidNavScrollState(const ScrollState& ss) {
-    return ss.page != kInvalidPageNo && ss.page > 0;
+    return ss.page > 0;
 }
 
-static double AbsNavPointDelta(double x) {
-    return x < 0 ? -x : x;
-}
-
+// two views count as "the same" when they show the same page within about
+// half a viewport of each other, so small scroll adjustments don't create
+// distinct history entries
 static bool IsMeaningfullyDifferentNavScrollState(DisplayModel* dm, const ScrollState& a, const ScrollState& b) {
     if (!IsValidNavScrollState(a) || !IsValidNavScrollState(b)) {
         return true;
     }
-
     if (a.page != b.page) {
         return true;
     }
-
     Rect viewPort = dm->GetViewPort();
-
     double minDx = std::max(32.0, viewPort.dx * 0.50);
     double minDy = std::max(32.0, viewPort.dy * 0.50);
-
-    return AbsNavPointDelta(a.x - b.x) > minDx || AbsNavPointDelta(a.y - b.y) > minDy;
+    return fabs(a.x - b.x) > minDx || fabs(a.y - b.y) > minDy;
 }
 
+// called right before an explicit view change with the current (pre-change)
+// scroll state. Returns true if that view should be committed to navHistory
+// (i.e. the caller should AddNavPoint()).
 static bool ShouldCommitStableNavPointBeforeViewChange(DisplayModel* dm, const ScrollState& curr) {
-    if (!IsValidNavScrollState(curr)) {
-        return false;
-    }
-
-    auto* rec = GetStableNavPointRecord(dm, true);
-    if (rec->suppress) {
+    auto& nav = dm->stableNavPoint;
+    if (nav.suppress || !IsValidNavScrollState(curr)) {
         return false;
     }
 
     DWORD64 now = GetTickCount64();
 
-    // First explicit user movement: remember the initial view so Back can
-    // return to it. AddNavPoint() still de-duplicates exact repeats.
-    if (!rec->hasPending) {
-        rec->pending = curr;
-        rec->pendingTick = now;
-        rec->hasPending = true;
-        rec->lastCommitted = curr;
-        rec->hasLastCommitted = true;
+    // first explicit user movement: remember the initial view so that Back
+    // can return to it. AddNavPoint() de-duplicates exact repeats.
+    if (!nav.hasPending) {
+        nav.pending = curr;
+        nav.pendingTick = now;
+        nav.hasPending = true;
+        nav.lastCommitted = curr;
+        nav.hasLastCommitted = true;
         return true;
     }
 
-    // The visible view changed since the last candidate was recorded; start
-    // the stability window again instead of committing an intermediate view.
-    if (IsMeaningfullyDifferentNavScrollState(dm, curr, rec->pending)) {
-        rec->pending = curr;
-        rec->pendingTick = now;
+    // the visible view changed since the last candidate was recorded; start
+    // the stability window again instead of committing an intermediate view
+    if (IsMeaningfullyDifferentNavScrollState(dm, curr, nav.pending)) {
+        nav.pending = curr;
+        nav.pendingTick = now;
         return false;
     }
 
-    if (now - rec->pendingTick < kStableNavPointDelayMs) {
+    if (now - nav.pendingTick < kStableNavPointDelayMs) {
         return false;
     }
 
-    if (rec->hasLastCommitted && !IsMeaningfullyDifferentNavScrollState(dm, curr, rec->lastCommitted)) {
+    if (nav.hasLastCommitted && !IsMeaningfullyDifferentNavScrollState(dm, curr, nav.lastCommitted)) {
         return false;
     }
 
-    rec->lastCommitted = curr;
-    rec->hasLastCommitted = true;
+    nav.lastCommitted = curr;
+    nav.hasLastCommitted = true;
     return true;
 }
 
+// called after a view change completed; the new view becomes the candidate
+// for the next stable nav point
 static void RememberStableNavPointCandidateAfterViewChange(DisplayModel* dm, const ScrollState& curr) {
-    if (!IsValidNavScrollState(curr)) {
+    auto& nav = dm->stableNavPoint;
+    if (nav.suppress || !IsValidNavScrollState(curr)) {
         return;
     }
-    auto* rec = GetStableNavPointRecord(dm, true);
-    if (rec->suppress) {
-        return;
-    }
-    rec->pending = curr;
-    rec->pendingTick = GetTickCount64();
-    rec->hasPending = true;
-}
-
-static void SetStableNavPointSuppressed(DisplayModel* dm, bool suppress) {
-    auto* rec = GetStableNavPointRecord(dm, true);
-    rec->suppress = suppress;
+    nav.pending = curr;
+    nav.pendingTick = GetTickCount64();
+    nav.hasPending = true;
 }
 
 // must call SetInitialViewSettings() after creation
@@ -491,7 +443,6 @@ DisplayModel::DisplayModel(EngineBase* engine, DocControllerCallback* cb) : DocC
 
 DisplayModel::~DisplayModel() {
     logf("~DisplayModel: 0x%p\n", this);
-    ForgetStableNavPointRecord(this);
     pauseRendering = true;
     if (cb) {
         cb->CleanUp(this);
@@ -2088,7 +2039,9 @@ void DisplayModel::SetScrollState(const ScrollState& state) {
     if (gLogScrollState) {
         logf("SetScrollState: page: %d, pos: %d,%d\n", state.page, (int)state.x, (int)state.y);
     }
-    SetStableNavPointSuppressed(this, true);
+    // this restores a view (session restore, Back / Forward themselves):
+    // don't let stable nav point tracking record it as user navigation
+    stableNavPoint.suppress = true;
     // must have both GoToPage() calls
     GoToPage(state.page, false);
     // Bail out, if the page wasn't scrolled
@@ -2096,7 +2049,7 @@ void DisplayModel::SetScrollState(const ScrollState& state) {
         if (gLogScrollState) {
             logf("  exit because not scrolled\n");
         }
-        SetStableNavPointSuppressed(this, false);
+        stableNavPoint.suppress = false;
         return;
     }
 
@@ -2123,7 +2076,7 @@ void DisplayModel::SetScrollState(const ScrollState& state) {
         logf("  newPt:  %d,%d\n", newPt.x, newPt.y);
     }
     GoToPage(state.page, newPt.y, false, newPt.x);
-    SetStableNavPointSuppressed(this, false);
+    stableNavPoint.suppress = false;
 }
 
 // don't remember more than "enough" history entries (same number as Firefox uses)

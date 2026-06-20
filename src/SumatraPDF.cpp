@@ -66,6 +66,7 @@
 #include "AppSettings.h"
 #include "AppTools.h"
 #include "Canvas.h"
+#include "RefHover.h"
 #include "CrashHandler.h"
 #include "ExternalViewers.h"
 #include "Favorites.h"
@@ -136,7 +137,7 @@ bool SettingsUseTabs() {
 }
 
 bool SettingsRestoreSession() {
-    return gGlobalPrefs->restoreSession && !gMyWindowWasEmbedded;
+    return gGlobalPrefs->restoreSession && !gMyWindowWasEmbedded && !gForTesting;
 }
 
 bool SettingsRememberOpenedFiles() {
@@ -3030,6 +3031,9 @@ static void CloseDocumentInCurrentTab(MainWindow* win, bool keepUIEnabled, bool 
     win->annotationBeingResized = false;
 
     win->fwdSearchMark.show = false;
+    // hide the citation-hover popup and cancel a pending hover: it
+    // belongs to the document being closed / replaced
+    RefHoverHide(win->refHover, win->hwndCanvas);
     if (win->uiaProvider) {
         win->uiaProvider->OnDocumentUnload();
     }
@@ -7706,6 +7710,13 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             return 0;
         }
 
+        case CmdToggleHoverPreview:
+            // a negative CitationHoverDelay disables the citation /
+            // reference hover preview; re-enable with the default delay
+            gGlobalPrefs->citationHoverDelay = (gGlobalPrefs->citationHoverDelay >= 0) ? -1 : 300;
+            SaveSettings();
+            break;
+
         case CmdToggleTips: {
             gGlobalPrefs->showTips = !gGlobalPrefs->showTips;
             SaveSettings();
@@ -9240,6 +9251,10 @@ LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
         case WM_ACTIVATE:
             if (wp != WA_INACTIVE) {
                 gLastActiveFrameHwnd = hwnd;
+            } else if (win) {
+                // hide the topmost citation-hover popup when switching to
+                // another application (no WM_MOUSELEAVE is generated then)
+                RefHoverHide(win->refHover, win->hwndCanvas);
             }
             break;
 
